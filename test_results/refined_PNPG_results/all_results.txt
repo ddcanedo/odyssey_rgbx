@@ -1,0 +1,3 @@
+1 background	99.960%
+2 hillfort	28.011%
+----------     mean_IoU	63.986%	freq_IoU	99.946%	mean_pixel_acc	89.855%	pixel_acc	99.960%

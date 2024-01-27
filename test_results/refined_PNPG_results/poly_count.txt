@@ -1,0 +1,7 @@
+[Original model] 
+All: 5687
+
+[Refined model]
+All: 188
+After area filter: 59
+After area and margin filters: 49
