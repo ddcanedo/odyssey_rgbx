@@ -22,6 +22,7 @@ from owslib.wms import WebMapService
 from timm.models.layers import to_2tuple
 from utils.transforms import pad_image_to_shape, normalize
 import shutil
+from utils.pyt_utils import ensure_dir
 
 csv.field_size_limit(sys.maxsize)
 Image.MAX_IMAGE_PIXELS = None
@@ -204,7 +205,20 @@ def sliding_eval_rgbX(img, modal_x, crop_size, stride_rate, val_func, device=Non
 		processed_pred += scale_process_rgbX(img_scale, modal_x_scale, (ori_rows, ori_cols),
 													crop_size, stride_rate, val_func, device)
 
-	pred = processed_pred.argmax(2)
+	processed_pred_tensor = torch.from_numpy(processed_pred)
+
+	# Apply softmax across the channel dimension (last dimension in this case)
+	probabilities = nn.functional.softmax(processed_pred_tensor, dim=2)
+	probabilities = probabilities.numpy()
+
+	mask = probabilities[:, :, 1:] <= 0.95
+
+	# Iterate over each class (except background) and apply the mask
+	for i in range(1, probabilities.shape[2]):  # Start from 1 to exclude background class
+		probabilities[:, :, i][mask[:, :, i - 1]] = 0
+
+	pred = probabilities.argmax(2)
+	
 
 	return pred
 
@@ -510,7 +524,7 @@ def main():
 		annotation = annotationsFolder + csvAnnotation
 
 		for image in os.listdir(imagesFolder + csvAnnotation.split('.')[0]):
-			if not image.startswith('Exeter'):
+			if not image.startswith('Exeter-lrm1'):
 				continue
 
 			print(imagesFolder+csvAnnotation.split('.')[0] + '/' + image)

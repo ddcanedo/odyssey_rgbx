@@ -23,6 +23,7 @@ from timm.models.layers import to_2tuple
 from utils.transforms import pad_image_to_shape, normalize
 import shutil
 from tqdm import tqdm
+from utils.pyt_utils import ensure_dir
 
 csv.field_size_limit(sys.maxsize)
 Image.MAX_IMAGE_PIXELS = None
@@ -33,35 +34,21 @@ def mapping(value, min1, max1, min2, max2):
 	return (((value - min1) * (max2 - min2)) / (max1 - min1)) + min2
 
 
-def predict(img, modal_x, device, val_func):
-	pred = sliding_eval_rgbX(img, modal_x, config.eval_crop_size, config.eval_stride_rate, val_func, device)
+def predict(img, modal_x, device, val_func, confidence_threshold):
+	preds = sliding_eval_rgbX(img, modal_x, config.eval_crop_size, config.eval_stride_rate, val_func, confidence_threshold, device)
 
-	result_img = Image.fromarray(pred.astype(np.uint8), mode='P')
-	result_img = np.array(result_img)
-	result_img[result_img > 0] = 255
+	result_imgs = []
+	for pred in preds:
+		result_img = Image.fromarray(pred.astype(np.uint8), mode='P')
+		result_img = np.array(result_img)
+		result_img[result_img > 0] = 255
+		result_imgs.append(result_img)
 
-	return result_img
-
-
-def compute_metric(results):
-	hist = np.zeros((config.num_classes, config.num_classes))
-	correct = 0
-	labeled = 0
-	count = 0
-	for d in results:
-		hist += d['hist']
-		correct += d['correct']
-		labeled += d['labeled']
-		count += 1
-
-	iou, mean_IoU, _, freq_IoU, mean_pixel_acc, pixel_acc = compute_score(hist, correct, labeled)
-	result_line = print_iou(iou, freq_IoU, mean_pixel_acc, pixel_acc,
-							config.class_names, show_no_back=False)
-	return result_line, (iou, mean_IoU, freq_IoU, mean_pixel_acc, pixel_acc)
+	return result_imgs
 
 
 # add new funtion for rgb and modal X segmentation
-def sliding_eval_rgbX(img, modal_x, crop_size, stride_rate, val_func, device=None):
+def sliding_eval_rgbX(img, modal_x, crop_size, stride_rate, val_func, confidence_threshold, device=None):
 	crop_size = to_2tuple(crop_size)
 	ori_rows, ori_cols, _ = img.shape
 	processed_pred = np.zeros((ori_rows, ori_cols, config.num_classes))
@@ -77,9 +64,22 @@ def sliding_eval_rgbX(img, modal_x, crop_size, stride_rate, val_func, device=Non
 		processed_pred += scale_process_rgbX(img_scale, modal_x_scale, (ori_rows, ori_cols),
 													crop_size, stride_rate, val_func, device)
 
-	pred = processed_pred.argmax(2)
+	processed_pred_tensor = torch.from_numpy(processed_pred)
+	# Apply softmax across the channel dimension (last dimension in this case)
+	probabilities = nn.functional.softmax(processed_pred_tensor, dim=2)
+	probabilities = probabilities.numpy()
 
-	return pred
+	mask = probabilities[:, :, 1:] <= confidence_threshold
+
+	# Iterate over each class (except background) and apply the mask
+	for i in range(1, probabilities.shape[2]):  # Start from 1 to exclude background class
+		probabilities[:, :, i][mask[:, :, i - 1]] = 0
+
+	preds = []
+	preds.append(processed_pred.argmax(2)) # append prediction with higher probability
+	preds.append(probabilities.argmax(2)) # append prediction where classes except background need to be above a certain threshold probability
+
+	return preds
 
 
 def scale_process_rgbX(img, modal_x, ori_shape, crop_size, stride_rate, val_func, device=None):
@@ -197,7 +197,7 @@ def process_image_rgbX(img, modal_x, crop_size=None):
 
 def load_model():
 	model = segmodel(cfg=config, criterion=None, norm_layer=nn.BatchNorm2d)
-	state_dict = torch.load('finetuned_UK.pth')
+	state_dict = torch.load(config.checkpoint_dir + '/finetuned_UK.pth')
 	if 'model' in state_dict.keys():
 		state_dict = state_dict['model']
 	elif 'state_dict' in state_dict.keys():
@@ -258,9 +258,11 @@ def main():
 
 
 	area_threshold = 1480
-	margin_threshold = 50 #pixels
+	margin_threshold = 50 # pixels
+	confidence_threshold = 0.95
 
-	not_in_margins = []
+	predictions1 = []
+	predictions2 = []
 
 	# Define the margin rectangles (top, bottom, left, right)
 	margin_rects = [
@@ -270,8 +272,10 @@ def main():
 		(resolution - margin_threshold, 0, resolution, resolution)  # Right margin
 	]
 
+
 	# Iterates over the images
 	for lrm in os.listdir(imagesFolder):
+
 		print(imagesFolder + lrm)
 		image = imagesFolder + lrm
 
@@ -296,7 +300,7 @@ def main():
 			for j in tqdm(range(0, height, resolution//2)):
 
 				crop = (i, resolution+i, j, resolution+j)
-				#print(crop)
+
 				cropped_img = img.crop((i, j, resolution+i, resolution+j))
 
 				# get sattelite image
@@ -326,44 +330,69 @@ def main():
 				
 				modal_x = np.array(cropped_img)
 
-				mask = predict(orthoimage, modal_x, device, model)
+				masks = predict(orthoimage, modal_x, device, model, confidence_threshold)
 
-				ret, thresh = cv2.threshold(np.array(mask), 127, 255, 0)
-				contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+				for z in range(len(masks)):
+					ret, thresh = cv2.threshold(np.array(masks[z]), 127, 255, 0)
+					contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-				area_mask = np.zeros((resolution, resolution), dtype=np.uint8)
-				margin_mask = np.zeros((resolution, resolution), dtype=np.uint8)
-				for c in contours:
-					polygon = []
-					for p in c:
-						p = p.squeeze()
-						# cropped image to image extent
-						x = mapping(p[0], 0, resolution, crop[0], crop[1])
-						y = mapping(p[1], 0, resolution, crop[2], crop[3])
+					area_mask = np.zeros((resolution, resolution), dtype=np.uint8)
+					margin_mask = np.zeros((resolution, resolution), dtype=np.uint8)
+					for c in contours:
+						polygon = []
+						for p in c:
+							p = p.squeeze()
+							# cropped image to image extent
+							x = mapping(p[0], 0, resolution, crop[0], crop[1])
+							y = mapping(p[1], 0, resolution, crop[2], crop[3])
 
-						# image extent to GIS
-						x = mapping(x, 0, width, xMinImg, xMaxImg)
-						y = mapping(y, height, 0, yMinImg, yMaxImg)
+							# image extent to GIS
+							x = mapping(x, 0, width, xMinImg, xMaxImg)
+							y = mapping(y, height, 0, yMinImg, yMaxImg)
 
-						polygon.append((x,y))
+							polygon.append((x,y))
 
-					# area filter
-					area = cv2.contourArea(c)
-					if area >= area_threshold:
-						# margin filter
-						margin_valid = valid_margin_contour(c, area, resolution, margin_rects, threshold=0.5)
-						if margin_valid:
-							not_in_margins.append(polygon)
+						# area filter
+						area = cv2.contourArea(c)
+						if area >= area_threshold:
+							# margin filter
+							margin_valid = valid_margin_contour(c, area, resolution, margin_rects, threshold=0.5)
+							if margin_valid:
+								if z == 0:
+									predictions1.append(polygon)
+								else:
+									predictions2.append(polygon)
 
 
-		filtered_list = [item for item in not_in_margins if len(item) >= 3]
+		filtered_list = [item for item in predictions1 if len(item) >= 3]
 
 		polygons = [Polygon(coords) for coords in filtered_list]
 
 		# Perform the union of all polygons
 		margin_unioned = unary_union(polygons)
 
-		f = open('test_results/uk_results/' + lrm.split('.')[0] + '.csv', 'w')
+		saving_dir = 'test_results/uk_results_50/'
+		ensure_dir(saving_dir)
+
+		f = open(saving_dir + lrm.split('.')[0] + '.csv', 'w')
+		writer = csv.writer(f)
+		writer.writerow(['WKT', 'Id'])
+		writer.writerow([str(margin_unioned), "Castro"])
+		f.close()
+
+
+
+		filtered_list = [item for item in predictions2 if len(item) >= 3]
+
+		polygons = [Polygon(coords) for coords in filtered_list]
+
+		# Perform the union of all polygons
+		margin_unioned = unary_union(polygons)
+
+		saving_dir = 'test_results/uk_results_' + str(int(confidence_threshold*100)) + '/'
+		ensure_dir(saving_dir)
+
+		f = open(saving_dir + lrm.split('.')[0] + '.csv', 'w')
 		writer = csv.writer(f)
 		writer.writerow(['WKT', 'Id'])
 		writer.writerow([str(margin_unioned), "Castro"])
