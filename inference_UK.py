@@ -259,7 +259,7 @@ def main():
 
 	area_threshold = 1480
 	margin_threshold = 50 # pixels
-	confidence_threshold = 0.95
+	confidence_threshold = 0.85
 
 	# Define the margin rectangles (top, bottom, left, right)
 	margin_rects = [
