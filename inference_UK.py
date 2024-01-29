@@ -261,9 +261,6 @@ def main():
 	margin_threshold = 50 # pixels
 	confidence_threshold = 0.95
 
-	predictions1 = []
-	predictions2 = []
-
 	# Define the margin rectangles (top, bottom, left, right)
 	margin_rects = [
 		(0, 0, resolution, margin_threshold),  # Top margin
@@ -275,6 +272,11 @@ def main():
 
 	# Iterates over the images
 	for lrm in os.listdir(imagesFolder):
+		if lrm.split('.')[-1] != 'tif':
+			continue
+		
+		predictions1 = []
+		predictions2 = []
 
 		print(imagesFolder + lrm)
 		image = imagesFolder + lrm
