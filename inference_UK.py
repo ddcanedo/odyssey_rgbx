@@ -197,7 +197,7 @@ def process_image_rgbX(img, modal_x, crop_size=None):
 
 def load_model():
 	model = segmodel(cfg=config, criterion=None, norm_layer=nn.BatchNorm2d)
-	state_dict = torch.load(config.checkpoint_dir + '/finetuned_UK.pth')
+	state_dict = torch.load('finetuned_UK.pth')
 	if 'model' in state_dict.keys():
 		state_dict = state_dict['model']
 	elif 'state_dict' in state_dict.keys():
